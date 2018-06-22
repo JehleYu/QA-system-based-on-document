@@ -1,0 +1,351 @@
+#Author:Jehle Yu
+#QA system
+#Last update date:22/06/2018
+import json
+import os
+import sys
+import time
+import csv
+import nltk
+import timeit, random, operator
+import numpy as np
+from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.corpus import stopwords
+stopwords = set(stopwords.words("english"))
+from math import log
+from collections import defaultdict, Counter
+from nltk.tag import StanfordNERTagger
+import spacy
+import math
+import unicodecsv
+nlp = spacy.load('en_core_web_sm')
+#from logistic_sgd import LogisticRegression, load_data
+with open("documents.json",'r')as load_d:
+    document=json.load(load_d,encoding='utf-8')
+with open("training.json",'r')as load_train:
+    trainset=json.load(load_train,encoding='utf-8')
+with open("devel.json",'r')as load_develset:
+    develset=json.load(load_develset,encoding='utf-8')
+with open("testing.json",'r')as load_testset:
+    testset=json.load(load_testset,encoding='utf-8')
+
+#Data preprocessing
+def each_doc(documentset):
+    docs = []
+    for document in documentset:
+        add_doc=document.values()[0]
+        docs.append(add_doc)
+    return docs
+
+#Data preprocessing
+def split_QA(train_set,documentset):
+    Question=[]
+    Answer=[]
+    Document=[]
+    for each in train_set:
+        Question.append(each.values()[2])
+        Answer.append(each.values()[0])
+        Document.append(documentset[each.values()[1]][each.values()[-1]])
+    return Answer,Question,Document 
+
+def getparaterm(onedoc):
+    terms = []
+    for eachword in nltk.word_tokenize(onedoc):
+        if eachword.lower() not in stopwords: 
+            terms.append(stemmer.stem(eachword.lower()))
+    return terms
+
+def getwordfreq(paragraph):
+    #return the count of each word in one paragraph
+    paracounter=Counter()
+    for each in paragraph:
+        if each not in stopwords:
+            paracounter[each]+=1
+    return paracounter
+
+#Get the paragraph rank
+def getparafreq(para_freqs):
+    paracount=Counter()
+    for each in para_freqs.values():
+        for eachone in each.keys():
+            paracount[eachone]+=1
+    return paracount
+
+#Use Information retrieval (TF-IDF) to find the most likely paragraph
+#that include the answer
+def IR(document):
+    result={}
+    for eachdocid in range(len(document)):
+        text=document[eachdocid]
+        eachpara={}
+        eachpara_freqs={}
+        for eachparaid in range(len(text)):
+            eachpara[eachparaid]=getparaterm(text[eachparaid])
+        #get the list:each paragraph 
+        for paraid,para in eachpara.items():
+            eachpara_freqs[paraid]=getwordfreq(para)
+        para_freq=getparafreq(eachpara_freqs)
+        doc_inverted_index=defaultdict(list)
+        M=len(eachpara_freqs)
+        for paraid, parafreq in eachpara_freqs.items():
+            length=0
+            tfidf_value=[]
+            N=sum(parafreq.values())
+            for item, count in parafreq.items():
+                temp= float(count) / N * log(M / float(para_freq[item]))
+                tfidf_value.append((item,temp))
+                length+=pow(temp,2)
+            length=pow(length,0.5)
+            for item,temp in tfidf_value:
+                doc_inverted_index[item].append([paraid,temp/length])
+        result[eachdocid]=doc_inverted_index
+    return result
+
+def chooseDoc(query,ID,k):
+    acc=Counter()
+    for each in query:
+        temp=result[ID][each]
+        for eachdoc, value in temp:
+            acc[eachdoc]+=value
+    return acc.most_common(k)
+
+def chooseparagraph(question,ID,K):
+    choosepara=[]
+    eachword=set(getparaterm(question))
+    result=[docId for docId,value in chooseDoc(eachword,ID,K)]
+    for each in result:
+        choosepara.append(document_set[ID][each])
+    return choosepara
+document_set = each_doc(document)
+trainAnswerset, trainQuizset, traindocset = split_QA(trainset,document_set)
+devAnswerset, devQuizset, devdocset = split_QA(develset,document_set)
+stopwords = set(nltk.corpus.stopwords.words('english')) 
+stemmer = nltk.stem.PorterStemmer() 
+result=IR(document_set)
+
+def returnentity(setlist):
+    KTKT=nlp(setlist)
+    result=[]
+    for ent in KTKT.ents:
+        result.append(ent.label_)
+    if len(result)==0:
+        result.append('O')
+    return result
+
+def trainthedata(trainset1):
+    compareset=Counter()
+    for i in range(len(trainset1)):
+        answerKT=returnentity(trainset1[i]['text'])
+        quizKT=returnentity(trainset1[i]['question'])
+        if answerKT[-1]=='O' or quizKT[-1]=='O':
+            continue
+        for eachquiz in quizKT:
+            for eachanswer in answerKT:
+                pair=(eachquiz,eachanswer)
+        compareset[pair]+=1
+    return compareset
+
+def findthemost(ele,dic):
+    maxvalue=0
+    result='O'
+    for (a,b) in dic:
+        if a==ele and dic[(a,b)]>maxvalue:
+            maxvalue=dic[(a,b)]
+            result=b
+    return result
+
+def spacy_tag(sent):
+    s_tags = []
+    tagged = nlp(sent)
+    for ent in tagged.ents:
+        s_tags.append((ent.text, ent.label_))
+    return s_tags
+
+#Analysis the data in trainset
+#Get the entity pairs
+def find_entity_pair_function(dataset):
+    PERSON_counter = Counter()
+    PLACE_counter = Counter()
+    TIME_counter = Counter()
+    QUANTITY_counter = Counter()
+    questionwords_counter = Counter()
+    ORGANIZATION_counter = Counter()
+    for ele in dataset:
+        query = ele["question"]
+        query_type =get_question_entity(query)
+        standard_answer = ele["text"]
+        answer_type = spacy_tag(standard_answer)
+        answer = ''
+        for p,q in answer_type:
+            answer = answer + q + ' '
+        if query_type == 'PERSON':
+            PERSON_counter[answer] += 1
+        elif query_type == 'PLACE':
+            PLACE_counter[answer] += 1
+        elif query_type == 'TIME':
+            TIME_counter[answer] += 1
+        elif query_type == 'QUANTITY':
+            QUANTITY_counter[answer] += 1
+        elif query_type == 'questionwords':
+            questionwords_counter[answer] += 1
+        elif query_type == 'ORGANIZATION':
+            ORGANIZATION_counter[answer] += 1
+    print 'PERSON_COUNTER:',PERSON_counter
+    print 'PLACE_COUNTER:',PLACE_counter    
+    print 'TIME_COUNTER:',TIME_counter  
+    print 'QUANTITY_COUNTER:',QUANTITY_counter  
+    print 'questionwords_COUNTER:',questionwords_counter  
+    print 'ORGANIZATION_COUNTER:',ORGANIZATION_counter 
+    return
+
+#Use the find_entity_pair_function if u need learn from train set 
+#find_entity_pair_function(trainset)
+person_terms = set(['who','whom','whose','person','name','member'])
+location_terms = set(['where','capit', 'locat','countri','contri','citi'])
+number_terms =set(['number','valu','high','time', 'mani','much','cost', 'date','time','popul','size','long'])
+quantity_terms=set(['quantiti'])
+percent_terms=set(['percent','%','percentag','point'])
+HOWMANI_terms=set(['how mani'])
+stemmer = nltk.stem.PorterStemmer() 
+
+def get_terms(text):
+    terms = []
+    for token in nltk.word_tokenize(text):
+        terms.append(stemmer.stem(token.lower()))
+    return terms
+
+def get_question_entity(question):
+    q_words = get_terms(question)
+    ett = "CARDINAL"
+    for word in q_words:
+        if word in person_terms:
+            ett = "PERSON"
+            break
+        if word in location_terms:
+            ett = "LOCATION"
+            break
+        if word in number_terms:
+            ett = "DATE"
+            break
+        if word in percent_terms:
+            ett = "PERCENT"
+            break
+        if word in quantity_terms:
+            ett = "QUANTITY"
+            break
+        if word in HOWMANI_terms:
+            ett = "HOWMANI"
+            break
+        #else:
+            #KTfromspacy=returnentity(question)
+            #ett=findthemost(KTfromspacy[0],KTKTfromtrain1)
+    return ett
+
+def flat_paragraphs(paragraphs):
+    sents = []
+    for p in paragraphs:
+        sents.extend(nltk.sent_tokenize(p))
+    return sents
+
+def get_cos_distance(sent,question):
+    sent_tf = Counter(get_terms(sent))
+    question_tf = Counter(get_terms(question))
+    
+    intersection = set(sent_tf.keys()) & set(question_tf.keys())
+    
+    numerator = sum([sent_tf[x] * question_tf[x] for x in intersection])
+
+    sum1 = sum([sent_tf[x]**2 for x in sent_tf.keys()])
+    sum2 = sum([question_tf[x]**2 for x in question_tf.keys()])
+    denominator = math.sqrt(sum1) * math.sqrt(sum2)
+
+    if not denominator:
+        return 0.0
+    else:
+        return float(numerator) / denominator
+
+def select_sentences(sentences,question):
+    sent_dist = Counter()
+    for sent in sentences:
+        cos_dist = get_cos_distance(sent,question)
+        if cos_dist > 0:
+            sent_dist[sent] = cos_dist
+    return sent_dist.most_common()
+
+def select_answer(sents_counter,question,n):
+    (firs,_)=sents_counter[0]
+    question_entity=get_question_entity(question)
+    #if len(question_KTscapy)>0 and question_entity=='OTHER' and 'O' not in question_KTscapy:
+        #question_entity=question_KTscapy[0]
+    returnlist=[]
+    for sent,_ in sents_counter:
+        sent_etts=nlp(sent)
+        for each in sent_etts.ents:
+            if len(returnlist)==n:
+                break
+            # TODO more sophisticated way to get answer
+            if each.label_ == question_entity and question.find(each.text)<0 and each.text not in returnlist:
+                returnlist.append(each.text)
+            if each.label_=='DATE' and question_entity=='TIME'and question.find(each.text)<0:
+                returnlist.append(each.text)
+            if each.label_=='TIME' and question_entity=='DATE'and question.find(each.text)<0:
+                returnlist.append(each.text)
+    if len(returnlist)>0:
+        result=''
+        for each in returnlist:
+            result=result+each+' '
+        return result
+    else:
+        firs1=firs.split(' ')
+        resultsen=''
+        noneedset=set(nltk.word_tokenize(question))
+        
+        for each in firs1:
+                resultsen=resultsen+each+' '
+        return resultsen
+
+#Test the reliability of the above code 
+def testfunction(qqqq,docid,topN):
+    demo_paras = chooseparagraph(qqqq,docid,topN)
+    demo_sentences = flat_paragraphs(demo_paras)
+    demo_topk_sents = select_sentences(demo_sentences,qqqq)
+    answer = select_answer(demo_topk_sents,qqqq,2)
+    print demo_sentences
+    return answer
+inputqqqq=aaaaaa['question']
+print testfunction(inputqqqq,aaaaaa['docid'],3)
+
+#Answer the question in test set and store the answers in JHY.csv
+def createanswertest(testset,n):
+    dev_result=[]
+    with open("JHY.csv","wb") as f:
+        writer = unicodecsv.writer(f,encoding='utf-8-sig')
+        writer.writerow(["id", "answer"])
+        for each in range(len(testset)):
+            QQQ=testset[each]['question']
+            demo_paras = chooseparagraph(QQQ,testset[each]['docid'],3)
+            demo_sentences = flat_paragraphs(demo_paras)
+            demo_topk_sents = select_sentences(demo_sentences,QQQ)
+            answer = select_answer(demo_topk_sents,QQQ,n)
+            writer.writerow([each,answer])
+            dev_result.append(answer)
+    f.close()
+    return dev_result
+
+
+#remove the question word
+#This function can help to increase F1 score
+doneresult=[]
+for i in range(len(dev_result)):
+    questionfromtest=testset[i]['question']
+    tempqq=''.join(questionfromtest)
+    noneedset=get_terms(questionfromtest)
+    
+    proresult=dev_result[i].split(' ')
+    templist=[]
+    for each in proresult:
+        if each not in noneedset and each!='':
+            print each
+            templist.append(each)
+    doneresult.append(templist)
